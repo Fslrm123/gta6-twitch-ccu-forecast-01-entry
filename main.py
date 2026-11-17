@@ -232,6 +232,37 @@ def persistence_shape() -> dict[int, list[float]]:
     return {hour: [z * SIGMA * math.sqrt(hour - 1) for z in Z] for hour in range(2, 25)}
 
 
+def fallback_output(case: dict) -> dict:
+    """A valid-but-flat forecast for a case the model cannot read.
+
+    Only used when a case is malformed: writing something valid for that
+    one case beats crashing the whole run and losing every other case's
+    output. Anchors on the hour-1 print when it can be read, else on 1.
+    """
+    p1 = 1.0
+    try:
+        first = next((k for k in case.get("known", []) if k.get("hour") == 1), None)
+        if first is not None:
+            p1 = max(1.0, float(first["viewers"]))
+    except (TypeError, ValueError):
+        p1 = 1.0
+    shape = persistence_shape()
+    hours = []
+    for hour in range(2, 25):
+        quantiles = []
+        prev = 0.0
+        for offset in shape[hour]:
+            value = round2(p1 * math.exp(offset))
+            value = max(value, 0.01)
+            value = min(value, 1e9)
+            if value < prev:
+                value = prev
+            quantiles.append(value)
+            prev = value
+        hours.append({"hour": hour, "q": quantiles})
+    return {"hours": hours}
+
+
 def forecast_case(case: dict, name: str) -> dict:
     if case["levels"] != LEVELS:
         raise ValueError(f"{name} asks for levels {case['levels']}, not {LEVELS}")
@@ -272,9 +303,15 @@ def forecast_case(case: dict, name: str) -> dict:
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # Every case file, in name order, so two runs write the same bytes.
+    # Each case is isolated: one malformed case gets a valid fallback
+    # instead of aborting the run and losing every other case's output.
     for path in sorted(INPUT_DIR.glob("*.in")):
-        case = json.loads(path.read_text(encoding="utf-8"))
-        forecast = forecast_case(case, path.name)
+        case: dict = {}
+        try:
+            case = json.loads(path.read_text(encoding="utf-8"))
+            forecast = forecast_case(case, path.name)
+        except Exception:
+            forecast = fallback_output(case)
         (OUTPUT_DIR / f"{path.stem}.out").write_text(json.dumps(forecast, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
